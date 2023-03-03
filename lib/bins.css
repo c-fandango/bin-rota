@@ -1,0 +1,29 @@
+.background {
+    background-color: PapayaWhip
+}
+.main-body {
+     margin: 0 auto;
+     font-size: 30px;
+     justify-content: center;
+     height: 100vh;
+     color: DarkSlateGray;
+     align-items: center;
+     text-align: center;
+     border-spacing: 25px 0;
+     font-family: courier;
+     height: 10px;
+}
+ .heading{
+     color: MidnightBlue;
+     width: 50%;
+     text-align: center;
+     margin: 0 auto;
+     font-family: courier;
+}
+ .domestic{
+     color: Black;
+}
+ .recycle{
+     color: MidnightBlue;
+}
+
