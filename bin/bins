@@ -1,0 +1,169 @@
+#!/usr/bin/python3
+
+import argparse
+import requests
+import yaml
+import json
+import logging
+import sys
+import ssl
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+def load_config(filepath):
+
+    with open(filepath, 'r') as file:
+        config = yaml.safe_load(file)
+
+    return config
+
+def get_address_id(url, street, house_number):
+
+    tcp_response = requests.get(url=url, timeout=300)
+    response = json.loads(tcp_response.text)
+
+    for address in response:
+        if address.get('street') == street.upper() and address.get('houseNumber') == str(house_number):
+            return address['id']
+
+
+def get_bin_dates(url):
+
+    tcp_response = requests.get(url=url, timeout=300)
+    response = json.loads(tcp_response.text)
+
+    return response['collections']
+        
+
+class BinHandler(BaseHTTPRequestHandler):
+
+    def __init__(self, request, client_address, server):
+        super().__init__(request, client_address, server)
+        self.config = {} 
+
+
+    def do_GET(self):
+        if self.path == '/':
+
+            logging.info('request recieved')
+            try:
+                response = get_bin_html(self.config)
+                self.send_response(200)
+            except Exception as exception:
+                logging.error('internal server error, %s', exception)
+                self.send_response(500)
+
+            logging.info('sending response')
+
+            self.protocol_version = 'HTTP/1.0'
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            response_bytes = response.encode()
+            response_size = len(response_bytes)
+            self.send_header("Content-length", response_bytes)
+
+            self.wfile.write(response_bytes)
+
+def get_bin_html(config):
+    gov_domain = config['gov_domain']
+    address = config['address']
+    lookahead = config['lookahead']
+    data_file = config['data_file']
+    rooms = config['rooms']
+    valid_bins = config['valid_bins']
+
+    address_id_url = f"http://{gov_domain}/wastecalendar/address/search?postCode={address['postcode']}"
+
+    logging.info('fetching address id...')
+    address_id = get_address_id(address_id_url, address['street'], address['number'])
+    if not address_id:
+        logging.error('error, no address id returned')
+        sys.exit()
+
+    bin_dates_url = f"http://{gov_domain}/wastecalendar/collection/search/{address_id}/\\?numberOfCollections={lookahead}"
+
+    logging.info('fetching bin json...')
+    new_bin_dates = get_bin_dates(bin_dates_url)
+
+    logging.info('loading historic data...')
+    with open(data_file, 'r') as file:
+        old_data = json.load(file)
+    
+    logging.info('processing data...')
+    earliest_new_date = min( item['date'] for item in new_bin_dates )
+    old_data = [ entry for entry in old_data if entry['date'] < earliest_new_date ] 
+    last_bin = old_data[-1]['room']
+
+    all_data = old_data.copy()
+
+    room_index = rooms.index(last_bin)
+
+    for bin_date in new_bin_dates:
+        is_valid = [ bin_type for bin_type in bin_date['roundTypes'] if bin_type in valid_bins ]
+        if not bin_date.get('room') and is_valid:
+            room_index += 1
+            bin_date['room'] = rooms[room_index%len(rooms)]
+            bin_date['roundTypes'] = is_valid 
+            all_data.append(bin_date)
+
+    all_data = sorted(all_data, key=lambda x:x['date'])
+
+    logging.info('writing data to file...')
+    with open(data_file, 'w') as file:
+        json.dump(all_data, file)
+
+    bin_elements = ''
+    logging.info('generating html...')
+    for item in all_data:
+        slipped_str = ' (moved) ' if item['slippedCollection'] else ''
+        date_pretty = datetime.strptime(item['date'],'%Y-%m-%dT%H:%M:%SZ').strftime('%d-%b')
+        elems = ''.join([ f'<td class="{round_type.lower()}">{round_type.title()}</td>' for round_type in item['roundTypes'] ])
+        bin_elements += f'<tr><td>{date_pretty}</td>{elems}<td>Room {item["room"].title()} {slipped_str}</td></tr>'
+        
+    logging.info('loading css...')
+    with open(config['style_path'], 'r') as file:
+        css = file.read()
+
+    html = f'''
+<!DOCTYPE html>
+<html>
+<head>
+<title>Bin Dates</title>
+<style>
+{css}
+</style>
+</head>
+<body class="background" >
+
+<h1 class="heading">Bin Rota</h1>
+<br>
+<table class="main-body">
+{bin_elements}
+</table>
+
+</body>
+</html> 
+'''
+    return(html)
+
+def run_server(server_class, handler_class, config):
+    server_address = ('', config['server_port'])
+    httpd = server_class(server_address, handler_class)
+    httpd.RequestHandlerClass.config = config
+    httpd.socket = ssl.wrap_socket(httpd.socket, certfile=config['cert_file'],keyfile=config['privkey_file'], server_side=True)
+
+    httpd.serve_forever()
+
+parser = argparse.ArgumentParser(description='Get data of bin dates from location, input a config file')
+parser.add_argument('config_path')
+args = parser.parse_args()
+
+config_opts = load_config(args.config_path)
+
+logging.basicConfig(filename=config_opts['log_path'], format='%(asctime)s - %(message)s', level=logging.INFO)
+
+logging.info('loaded config')
+
+get_bin_html(config_opts)
+
+run_server(HTTPServer, BinHandler, config_opts)
